@@ -7,16 +7,15 @@
 - Delve is a bit clunky to use and I don't like vscode or golan*d*.
 - gdb-dashboard looks cool and gets the job done.
 
-## Screenshot
+### Screenshot
 
 ![Screenshot](/.github/screenshot1.png)
 
-## Commands
+### Commands
 
-| Command             | Alias(es)         | Description                                                                              |
+| Command             | Alias         | Description                                                                              |
 | :------------------ | :---------------- | :--------------------------------------------------------------------------------------- |
-| `continue`          | `c`               | Continue program execution until the next breakpoint or program termination.             |
-| `next`              | `n`               | Step to the next source line in the current function, stepping *over* function calls.      |
+| `continue`          | `c`               | Continue program execution until the next breakpoint or program termination.             | | `next`              | `n`               | Step to the next source line in the current function, stepping *over* function calls.      |
 | `step`              | `s`               | Step to the next source line, stepping *into* function calls.                            |
 | `stepout`           | `so`              | Continue execution until the current function returns.                                   |
 | `nexti`             | `ni`              | Step to the next CPU instruction, stepping *over* function calls.                        |
@@ -40,6 +39,6 @@
 * `<id>` refers to the numeric identifier of a breakpoint.
 * `<location>` specifies where to set a breakpoint.
 
-## Disclaimer
+### Disclaimer
 
 This is early stage, just a couple hours in. Pls don't read the code. Use at your own risk.
