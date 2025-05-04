@@ -9,7 +9,7 @@
 
 ## Screenshot
 
-![Screenshot](/.github/screenshot.png)
+![Screenshot](/.github/screenshot1.png)
 
 ## Commands
 
