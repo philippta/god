@@ -11,6 +11,24 @@
 
 ![Screenshot](/.github/screenshot.png)
 
+### Install
+
+```
+go install github.com/philippta/god@latest
+```
+
+### Usage
+
+Bit shitty for now, but this is how you use it:
+
+```bash
+# in one terminal
+dlv debug path/to/pkg --headless --listen 127.0.0.1:6060
+
+# in another terminal
+god
+```
+
 ### Commands
 
 | Command            | Alias              | Description                                                                                                                          |
