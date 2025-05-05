@@ -38,6 +38,7 @@ type TermState struct {
 	HeightSource    int
 	HeightAssembly  int
 	Watch           []string
+	Breakpoints     map[string][]int
 }
 
 var normalLoadConfig = api.LoadConfig{
@@ -57,7 +58,14 @@ func main() {
 	term := LoadTermState()
 	dlv := rpc2.NewClient("127.0.0.1:6060")
 
-	dlv.CreateBreakpoint(&api.Breakpoint{FunctionName: "main.main"})
+	for file, lines := range term.Breakpoints {
+		for _, line := range lines {
+			dlv.CreateBreakpoint(&api.Breakpoint{
+				File: file,
+				Line: line,
+			})
+		}
+	}
 
 	for {
 		state, err := GetState(dlv, term.Watch)
@@ -144,9 +152,7 @@ func Update(term TermState, debug DebugState, dlv *rpc2.RPCClient, cmd string) (
 	case "":
 		return Update(term, debug, dlv, term.LastCommand)
 	default:
-		if strings.HasPrefix(cmd, "t ") {
-			cmd = strings.Replace(cmd, "t ", "toggle ", 1)
-		} else if strings.HasPrefix(cmd, "c ") {
+		if strings.HasPrefix(cmd, "c ") {
 			cmd = strings.Replace(cmd, "c ", "clear ", 1)
 		} else if strings.HasPrefix(cmd, "b ") {
 			cmd = strings.Replace(cmd, "b ", "break ", 1)
@@ -156,33 +162,47 @@ func Update(term TermState, debug DebugState, dlv *rpc2.RPCClient, cmd string) (
 			cmd = strings.Replace(cmd, "uw ", "unwatch ", 1)
 		}
 
-		if after, ok := strings.CutPrefix(cmd, "toggle "); ok {
-			id, _ := strconv.Atoi(after)
-			dlv.ToggleBreakpoint(id)
-		} else if after, ok := strings.CutPrefix(cmd, "break "); ok {
+		if after, ok := strings.CutPrefix(cmd, "break "); ok {
 			if file, linestr, ok := strings.Cut(after, ":"); ok {
 				line, _ := strconv.Atoi(linestr)
 				if !strings.Contains(file, "/") {
 					file = filepath.Join(filepath.Dir(debug.File), file)
 				}
-				dlv.CreateBreakpoint(&api.Breakpoint{
+				bp, err := dlv.CreateBreakpoint(&api.Breakpoint{
 					File: file,
 					Line: line,
 				})
+				if err == nil {
+					term.Breakpoints[bp.File] = append(term.Breakpoints[bp.File], line)
+				}
 			} else {
 				line, err := strconv.Atoi(after)
 				if err != nil {
-					dlv.CreateBreakpoint(&api.Breakpoint{FunctionName: after})
+					bp, err := dlv.CreateBreakpoint(&api.Breakpoint{FunctionName: after})
+					if err == nil {
+						term.Breakpoints[bp.File] = append(term.Breakpoints[bp.File], bp.Line)
+					}
 				} else {
-					dlv.CreateBreakpoint(&api.Breakpoint{
+					bp, err := dlv.CreateBreakpoint(&api.Breakpoint{
 						File: debug.File,
 						Line: line,
 					})
+					if err == nil {
+						term.Breakpoints[bp.File] = append(term.Breakpoints[bp.File], line)
+					}
 				}
 			}
 		} else if after, ok := strings.CutPrefix(cmd, "clear "); ok {
 			id, _ := strconv.Atoi(after)
-			dlv.ClearBreakpoint(id)
+			bp, err := dlv.ClearBreakpoint(id)
+			if err == nil {
+				term.Breakpoints[bp.File] = slices.DeleteFunc(term.Breakpoints[bp.File], func(line int) bool {
+					return line == bp.Line
+				})
+				if len(term.Breakpoints[bp.File]) == 0 {
+					delete(term.Breakpoints, bp.File)
+				}
+			}
 		} else if after, ok := strings.CutPrefix(cmd, "watch "); ok {
 			term.Watch = append(term.Watch, after)
 		} else if after, ok := strings.CutPrefix(cmd, "unwatch "); ok {
@@ -243,8 +263,11 @@ func LoadTermState() TermState {
 		PaneAssembly:    true,
 		PaneVars:        true,
 		PaneBreakpoints: true,
+		PaneWatch:       true,
 		HeightSource:    9,
 		HeightAssembly:  9,
+		Watch:           []string{},
+		Breakpoints:     map[string][]int{},
 	}
 
 	file := filepath.Join(userHomeDir, ".godconfig")
@@ -263,6 +286,10 @@ func LoadTermState() TermState {
 
 func SaveTermState(state TermState) {
 	state.LastCommand = "?"
+
+	for file := range state.Breakpoints {
+		slices.Sort(state.Breakpoints[file])
+	}
 
 	file := filepath.Join(userHomeDir, ".godconfig")
 	data, err := json.MarshalIndent(state, "", "  ")
