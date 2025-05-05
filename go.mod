@@ -11,6 +11,9 @@ require (
 	github.com/cilium/ebpf v0.11.0 // indirect
 	github.com/hashicorp/golang-lru v1.0.2 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/mattn/go-runewidth v0.0.13 // indirect
+	github.com/peterh/liner v1.2.2 // indirect
+	github.com/rivo/uniseg v0.2.0 // indirect
 	golang.org/x/arch v0.11.0 // indirect
 	golang.org/x/exp v0.0.0-20230224173230-c95f2b4c22f2 // indirect
 	golang.org/x/sys v0.32.0 // indirect

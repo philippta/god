@@ -1,10 +1,11 @@
 package main
 
 import (
-	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/go-delve/delve/service/api"
 	"github.com/go-delve/delve/service/rpc2"
+	"github.com/peterh/liner"
 	"golang.org/x/term"
 )
 
@@ -21,6 +23,7 @@ type DebugState struct {
 	GoroutineID int64
 	VarsLocal   []api.Variable
 	VarsFunc    []api.Variable
+	Watch       []api.Variable
 	Breakpoints []*api.Breakpoint
 	Assembly    []api.AsmInstruction
 }
@@ -31,8 +34,10 @@ type TermState struct {
 	PaneAssembly    bool
 	PaneVars        bool
 	PaneBreakpoints bool
+	PaneWatch       bool
 	HeightSource    int
 	HeightAssembly  int
+	Watch           []string
 }
 
 var normalLoadConfig = api.LoadConfig{
@@ -43,17 +48,19 @@ var normalLoadConfig = api.LoadConfig{
 	MaxStructFields:    -1,
 }
 
-func main() {
-	width, _, _ := term.GetSize(1)
-	stdin := ListenStdin()
+var userHomeDir string
+var filecache = map[string][]string{}
 
+func main() {
+	userHomeDir, _ = os.UserHomeDir()
+	width, _, _ := term.GetSize(1)
+	term := LoadTermState()
 	dlv := rpc2.NewClient("127.0.0.1:6060")
+
 	dlv.CreateBreakpoint(&api.Breakpoint{FunctionName: "main.main"})
 
-	term := NewTermState()
-
 	for {
-		state, err := GetState(dlv)
+		state, err := GetState(dlv, term.Watch)
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -72,38 +79,29 @@ func main() {
 		if term.PaneVars {
 			printVars(w, state.VarsLocal, state.VarsFunc, width)
 		}
+		if term.PaneWatch {
+			printWatch(w, state.Watch, width)
+		}
 		if term.PaneBreakpoints {
 			printBreakpoints(w, state.Breakpoints, width)
 		}
 
 		printLine(w, width)
-		printReadLine(w)
-
 		os.Stdout.WriteString(w.String())
 
-		cmd, ok := <-stdin
-		if !ok {
+		cmd, err := ReadLine()
+		if err != nil {
 			break
 		}
 
+		var ok bool
 		term, ok = Update(term, state, dlv, cmd)
 		if !ok {
 			return
 		}
+		SaveTermState(term)
 	}
 
-}
-
-func NewTermState() TermState {
-	return TermState{
-		LastCommand:     "?",
-		PaneSource:      true,
-		PaneAssembly:    true,
-		PaneVars:        true,
-		PaneBreakpoints: true,
-		HeightSource:    9,
-		HeightAssembly:  9,
-	}
 }
 
 func Update(term TermState, debug DebugState, dlv *rpc2.RPCClient, cmd string) (TermState, bool) {
@@ -133,6 +131,8 @@ func Update(term TermState, debug DebugState, dlv *rpc2.RPCClient, cmd string) (
 		term.PaneVars = !term.PaneVars
 	case "pane bp", "pane breakpoints":
 		term.PaneBreakpoints = !term.PaneBreakpoints
+	case "pane watch":
+		term.PaneWatch = !term.PaneWatch
 	case "grow src", "grow source":
 		term.HeightSource += 2
 	case "grow asm", "grow assembly":
@@ -150,6 +150,10 @@ func Update(term TermState, debug DebugState, dlv *rpc2.RPCClient, cmd string) (
 			cmd = strings.Replace(cmd, "c ", "clear ", 1)
 		} else if strings.HasPrefix(cmd, "b ") {
 			cmd = strings.Replace(cmd, "b ", "break ", 1)
+		} else if strings.HasPrefix(cmd, "w ") {
+			cmd = strings.Replace(cmd, "w ", "watch ", 1)
+		} else if strings.HasPrefix(cmd, "uw ") {
+			cmd = strings.Replace(cmd, "uw ", "unwatch ", 1)
 		}
 
 		if after, ok := strings.CutPrefix(cmd, "toggle "); ok {
@@ -179,14 +183,97 @@ func Update(term TermState, debug DebugState, dlv *rpc2.RPCClient, cmd string) (
 		} else if after, ok := strings.CutPrefix(cmd, "clear "); ok {
 			id, _ := strconv.Atoi(after)
 			dlv.ClearBreakpoint(id)
+		} else if after, ok := strings.CutPrefix(cmd, "watch "); ok {
+			term.Watch = append(term.Watch, after)
+		} else if after, ok := strings.CutPrefix(cmd, "unwatch "); ok {
+			if id, err := strconv.Atoi(after); err == nil {
+				idx := id - 1
+				if idx >= 0 && idx < len(term.Watch) {
+					term.Watch = slices.Delete(term.Watch, idx, idx+1)
+				}
+			} else {
+				for i := range term.Watch {
+					if term.Watch[i] == after {
+						term.Watch = slices.Delete(term.Watch, i, i+1)
+					}
+				}
+			}
 		}
+
 	}
 
 	term.LastCommand = cmd
 	return term, true
 }
 
-func GetState(dlv *rpc2.RPCClient) (DebugState, error) {
+func ReadLine() (string, error) {
+	os.Stdout.Write(ColorReset)
+
+	histFile := filepath.Join(userHomeDir, ".godhistory")
+
+	ln := liner.NewLiner()
+	defer ln.Close()
+
+	if f, err := os.Open(histFile); err == nil {
+		ln.ReadHistory(f)
+		f.Close()
+	}
+
+	cmd, err := ln.Prompt(">>> ")
+	if err != nil {
+		return "", err
+	}
+	cmd = strings.TrimSpace(cmd)
+
+	if cmd != "" && cmd != "q" && cmd != "quit" {
+		ln.AppendHistory(cmd)
+		if f, err := os.Create(histFile); err == nil {
+			ln.WriteHistory(f)
+			f.Close()
+		}
+	}
+
+	return cmd, err
+}
+
+func LoadTermState() TermState {
+	defaultState := TermState{
+		LastCommand:     "?",
+		PaneSource:      true,
+		PaneAssembly:    true,
+		PaneVars:        true,
+		PaneBreakpoints: true,
+		HeightSource:    9,
+		HeightAssembly:  9,
+	}
+
+	file := filepath.Join(userHomeDir, ".godconfig")
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return defaultState
+	}
+
+	var state TermState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return defaultState
+	}
+
+	return state
+}
+
+func SaveTermState(state TermState) {
+	state.LastCommand = "?"
+
+	file := filepath.Join(userHomeDir, ".godconfig")
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return
+	}
+
+	os.WriteFile(file, data, 0o644)
+}
+
+func GetState(dlv *rpc2.RPCClient, watchExpr []string) (DebugState, error) {
 	ds, err := dlv.GetState()
 	if err != nil {
 		return DebugState{}, err
@@ -196,7 +283,6 @@ func GetState(dlv *rpc2.RPCClient) (DebugState, error) {
 	state.GoroutineID = ds.CurrentThread.GoroutineID
 	state.File = ds.CurrentThread.File
 	state.Line = ds.CurrentThread.Line
-
 	state.Breakpoints, err = dlv.ListBreakpoints(true)
 	if err != nil {
 		return DebugState{}, err
@@ -220,6 +306,14 @@ func GetState(dlv *rpc2.RPCClient) (DebugState, error) {
 		if err != nil {
 			return DebugState{}, err
 		}
+		for _, expr := range watchExpr {
+			v, err := dlv.EvalVariable(evalScope, expr, normalLoadConfig)
+			if err != nil {
+				state.Watch = append(state.Watch, api.Variable{Name: expr})
+			} else {
+				state.Watch = append(state.Watch, *v)
+			}
+		}
 	}
 
 	return state, nil
@@ -237,6 +331,30 @@ func printBreakpoints(w *strings.Builder, breakpoints []*api.Breakpoint, width i
 	}
 
 	tabw.Flush()
+}
+
+func printWatch(w *strings.Builder, watch []api.Variable, width int) {
+	printHeader(w, "Watch", width)
+
+	for i, v := range watch {
+		w.Write(ColorFGGray)
+		w.WriteString(strconv.Itoa(i + 1))
+		w.WriteString(" ")
+		w.Write(ColorFGWhite)
+		w.WriteString(v.Name)
+		w.Write(ColorFGGray)
+		w.WriteString(" = ")
+		w.Write(ColorFGWhite)
+
+		s := v.SinglelineStringWithShortTypes()
+		if len(s) > width-len(v.Name)-7 {
+			s = s[:width-len(v.Name)-7]
+		}
+
+		w.WriteString(s)
+		w.WriteString("\n")
+	}
+
 }
 
 func printAssembly(w *strings.Builder, instructions api.AsmInstructions, width, height int) {
@@ -392,12 +510,7 @@ func printHeader(w *strings.Builder, title string, width int) {
 func printLine(w *strings.Builder, width int) {
 	w.Write(ColorFGCyan)
 	w.WriteString(strings.Repeat("━", width))
-}
-
-func printReadLine(w *strings.Builder) {
-	w.Write(ColorFGMagenta)
-	w.WriteString(">>> ")
-	w.Write(ColorFGWhite)
+	w.WriteString("\n")
 }
 
 func numDigits(i int) int {
@@ -422,29 +535,6 @@ func iota(buf []byte, n int) {
 		}
 	}
 
-}
-
-var filecache = map[string][]string{}
-
-func ListenStdin() <-chan string {
-	stdin := bufio.NewReader(os.Stdin)
-	cmd := make(chan string)
-
-	go func() {
-		for {
-			str, err := stdin.ReadString('\n')
-			if err != nil {
-				close(cmd)
-				return
-			}
-			select {
-			case cmd <- strings.TrimSpace(str):
-			default:
-			}
-		}
-	}()
-
-	return cmd
 }
 
 func readFileLines(file string) []string {
