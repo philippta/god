@@ -26,6 +26,7 @@ type DebugState struct {
 	Watch       []api.Variable
 	Breakpoints []*api.Breakpoint
 	Assembly    []api.AsmInstruction
+	Threads     []*api.Thread
 }
 
 type TermState struct {
@@ -35,10 +36,12 @@ type TermState struct {
 	PaneVars        bool
 	PaneBreakpoints bool
 	PaneWatch       bool
+	PaneThreads     bool
 	HeightSource    int
 	HeightAssembly  int
 	Watch           []string
 	Breakpoints     map[string][]int
+	BreakpointFuncs map[string][]string
 }
 
 var normalLoadConfig = api.LoadConfig{
@@ -50,10 +53,12 @@ var normalLoadConfig = api.LoadConfig{
 }
 
 var userHomeDir string
+var projDir string
 var filecache = map[string][]string{}
 
 func main() {
 	userHomeDir, _ = os.UserHomeDir()
+	projDir = goModDir()
 	width, _, _ := term.GetSize(1)
 	term := LoadTermState()
 	dlv := rpc2.NewClient("127.0.0.1:6060")
@@ -65,6 +70,9 @@ func main() {
 				Line: line,
 			})
 		}
+	}
+	for _, f := range term.BreakpointFuncs[projDir] {
+		dlv.CreateBreakpoint(&api.Breakpoint{FunctionName: f})
 	}
 
 	for {
@@ -92,6 +100,9 @@ func main() {
 		}
 		if term.PaneBreakpoints {
 			printBreakpoints(w, state.Breakpoints, width)
+		}
+		if term.PaneThreads {
+			printThreads(w, state.Threads, state.GoroutineID, width)
 		}
 
 		printLine(w, width)
@@ -139,8 +150,10 @@ func Update(term TermState, debug DebugState, dlv *rpc2.RPCClient, cmd string) (
 		term.PaneVars = !term.PaneVars
 	case "pane bp", "pane breakpoints":
 		term.PaneBreakpoints = !term.PaneBreakpoints
-	case "pane watch":
+	case "pane w", "pane watch":
 		term.PaneWatch = !term.PaneWatch
+	case "pane t", "pane threads":
+		term.PaneThreads = !term.PaneThreads
 	case "grow src", "grow source":
 		term.HeightSource += 2
 	case "grow asm", "grow assembly":
@@ -160,6 +173,8 @@ func Update(term TermState, debug DebugState, dlv *rpc2.RPCClient, cmd string) (
 			cmd = strings.Replace(cmd, "w ", "watch ", 1)
 		} else if strings.HasPrefix(cmd, "uw ") {
 			cmd = strings.Replace(cmd, "uw ", "unwatch ", 1)
+		} else if strings.HasPrefix(cmd, "t ") {
+			cmd = strings.Replace(cmd, "t ", "thread ", 1)
 		}
 
 		if after, ok := strings.CutPrefix(cmd, "break "); ok {
@@ -178,9 +193,9 @@ func Update(term TermState, debug DebugState, dlv *rpc2.RPCClient, cmd string) (
 			} else {
 				line, err := strconv.Atoi(after)
 				if err != nil {
-					bp, err := dlv.CreateBreakpoint(&api.Breakpoint{FunctionName: after})
-					if err == nil {
-						term.Breakpoints[bp.File] = append(term.Breakpoints[bp.File], bp.Line)
+					_, err := dlv.CreateBreakpoint(&api.Breakpoint{FunctionName: after})
+					if err == nil && projDir != "" {
+						term.BreakpointFuncs[projDir] = append(term.BreakpointFuncs[projDir], after)
 					}
 				} else {
 					bp, err := dlv.CreateBreakpoint(&api.Breakpoint{
@@ -217,6 +232,10 @@ func Update(term TermState, debug DebugState, dlv *rpc2.RPCClient, cmd string) (
 						term.Watch = slices.Delete(term.Watch, i, i+1)
 					}
 				}
+			}
+		} else if after, ok := strings.CutPrefix(cmd, "thread "); ok {
+			if id, err := strconv.ParseInt(after, 10, 64); err == nil {
+				dlv.SwitchGoroutine(id)
 			}
 		}
 
@@ -264,10 +283,12 @@ func LoadTermState() TermState {
 		PaneVars:        true,
 		PaneBreakpoints: true,
 		PaneWatch:       true,
+		PaneThreads:     true,
 		HeightSource:    9,
 		HeightAssembly:  9,
 		Watch:           []string{},
 		Breakpoints:     map[string][]int{},
+		BreakpointFuncs: map[string][]string{},
 	}
 
 	file := filepath.Join(userHomeDir, ".godconfig")
@@ -311,11 +332,15 @@ func GetState(dlv *rpc2.RPCClient, watchExpr []string) (DebugState, error) {
 	state.File = ds.CurrentThread.File
 	state.Line = ds.CurrentThread.Line
 	state.Breakpoints, err = dlv.ListBreakpoints(true)
+	state.Threads = ds.Threads
 	if err != nil {
 		return DebugState{}, err
 	}
 	sort.Slice(state.Breakpoints, func(i, j int) bool {
 		return state.Breakpoints[i].ID < state.Breakpoints[j].ID
+	})
+	sort.Slice(state.Threads, func(i, j int) bool {
+		return state.Threads[i].ID < state.Threads[j].ID
 	})
 
 	evalScope := api.EvalScope{GoroutineID: state.GoroutineID}
@@ -341,9 +366,27 @@ func GetState(dlv *rpc2.RPCClient, watchExpr []string) (DebugState, error) {
 				state.Watch = append(state.Watch, *v)
 			}
 		}
+
 	}
 
 	return state, nil
+}
+
+func printThreads(w *strings.Builder, threads []*api.Thread, currentGID int64, width int) {
+	printHeader(w, "Threads", width)
+	tabw := tabwriter.NewWriter(w, 0, 1, 1, ' ', 0)
+
+	for _, t := range threads {
+		if t.GoroutineID > 0 && t.File != "." {
+			var curr string
+			if t.GoroutineID == currentGID {
+				curr = " *"
+			}
+			fmt.Fprintf(tabw, "%s%d\t%s%s:%d%s\n", ColorFGGray, t.GoroutineID, ColorFGWhite, filepath.Base(t.File), t.Line, curr)
+		}
+	}
+
+	tabw.Flush()
 }
 
 func printBreakpoints(w *strings.Builder, breakpoints []*api.Breakpoint, width int) {
@@ -578,6 +621,33 @@ func readFileLines(file string) []string {
 	lines := strings.Split(src, "\n")
 	filecache[file] = lines
 	return lines
+}
+
+func goModDir() string {
+	hasGoMod := func() bool {
+		_, err := os.Stat("go.mod")
+		return err == nil
+	}
+
+	orig, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	defer os.Chdir(orig)
+
+	for {
+		curr, err := os.Getwd()
+		if err != nil {
+			return ""
+		}
+		if curr == "/" {
+			return ""
+		}
+		if hasGoMod() {
+			return curr
+		}
+		os.Chdir(filepath.Dir(curr))
+	}
 }
 
 var (
