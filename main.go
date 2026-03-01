@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/go-delve/delve/service/api"
 	"github.com/go-delve/delve/service/rpc2"
@@ -52,9 +53,11 @@ var normalLoadConfig = api.LoadConfig{
 	MaxStructFields:    -1,
 }
 
-var userHomeDir string
-var projDir string
-var filecache = map[string][]string{}
+var (
+	userHomeDir string
+	projDir     string
+	filecache   = map[string][]string{}
+)
 
 func main() {
 	userHomeDir, _ = os.UserHomeDir()
@@ -120,7 +123,6 @@ func main() {
 		}
 		SaveTermState(term)
 	}
-
 }
 
 func Update(term TermState, debug DebugState, dlv *rpc2.RPCClient, cmd string) (TermState, bool) {
@@ -343,17 +345,38 @@ func GetState(dlv *rpc2.RPCClient, watchExpr []string) (DebugState, error) {
 		return state.Threads[i].ID < state.Threads[j].ID
 	})
 
-	evalScope := api.EvalScope{GoroutineID: state.GoroutineID}
+	evalScope := api.EvalScope{
+		GoroutineID: state.GoroutineID,
+		Frame:       0,
+	}
+
+	topmostFrame := 0
+	if frames, err := dlv.Stacktrace(state.GoroutineID, 10, api.StacktraceSimple, &normalLoadConfig); err == nil {
+		for i, frame := range frames {
+			fmt.Println(frame.Location.Function.Name())
+			if frame.Location.Function.Name() == "runtime.main" {
+				topmostFrame = i
+				break
+			}
+		}
+	}
 
 	if state.GoroutineID != 0 {
-		state.VarsLocal, err = dlv.ListLocalVariables(evalScope, normalLoadConfig)
-		if err != nil {
-			return DebugState{}, err
+		for i := range topmostFrame {
+			evalScope.Frame = i
+			varsLocal, err := dlv.ListLocalVariables(evalScope, normalLoadConfig)
+			if err != nil {
+				return DebugState{}, err
+			}
+			varsFunc, err := dlv.ListFunctionArgs(evalScope, normalLoadConfig)
+			if err != nil {
+				return DebugState{}, err
+			}
+
+			state.VarsLocal = append(state.VarsLocal, varsLocal...)
+			state.VarsFunc = append(state.VarsFunc, varsFunc...)
 		}
-		state.VarsFunc, err = dlv.ListFunctionArgs(evalScope, normalLoadConfig)
-		if err != nil {
-			return DebugState{}, err
-		}
+		evalScope.Frame = 0
 		state.Assembly, err = dlv.DisassemblePC(evalScope, ds.CurrentThread.PC, api.GoFlavour)
 		if err != nil {
 			return DebugState{}, err
@@ -396,7 +419,6 @@ func printBreakpoints(w *strings.Builder, breakpoints []*api.Breakpoint, width i
 	for _, bp := range breakpoints {
 		if bp.ID > 0 {
 			fmt.Fprintf(tabw, "%s%d\t%s%s:%d (%s)\n", ColorFGGray, bp.ID, ColorFGWhite, filepath.Base(bp.File), bp.Line, bp.FunctionName)
-
 		}
 	}
 
@@ -424,7 +446,6 @@ func printWatch(w *strings.Builder, watch []api.Variable, width int) {
 		w.WriteString(s)
 		w.WriteString("\n")
 	}
-
 }
 
 func printAssembly(w *strings.Builder, instructions api.AsmInstructions, width, height int) {
@@ -604,7 +625,6 @@ func iota(buf []byte, n int) {
 			buf[i] = ' '
 		}
 	}
-
 }
 
 func readFileLines(file string) []string {
